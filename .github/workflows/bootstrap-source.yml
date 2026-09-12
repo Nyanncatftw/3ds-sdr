@@ -1,0 +1,36 @@
+name: Restore public source
+
+on:
+  push:
+    paths:
+      - '.github/workflows/bootstrap-source.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore source/main.c
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p source
+          cat .bootstrap/main.c.bz2.b64.part* | base64 -d | bzip2 -d > source/main.c
+          test "$(wc -c < source/main.c)" -eq 134206
+          echo "f6bdcd91de9791de4e0eddb626d8bca9a53868fb71f489aeb778f68f8b4a20f2  source/main.c" | sha256sum -c -
+
+      - name: Commit source and remove bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add source/main.c
+          git rm -r .bootstrap
+          git rm .github/workflows/bootstrap-source.yml
+          git commit -m "Add v0.1.0-beta source"
+          git push
