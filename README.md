@@ -8,6 +8,24 @@ The RTL-SDR is the RF front end. The 3DS handles the scanner logic, FM demodulat
 >
 > Based on internal development build **v21.13d**.
 
+## Screenshots
+
+### Scanner / spectrum scope
+
+![3DS-SDR scanner and spectrum scope](screenshots/scanner-scope.png)
+
+### Waterfall with channel menu
+
+![3DS-SDR channel menu over waterfall](screenshots/channel-menu-waterfall.jpg)
+
+### Scan menu
+
+![3DS-SDR scan menu](screenshots/scan-menu.png)
+
+### System menu
+
+![3DS-SDR system menu](screenshots/system-menu.png)
+
 ## Development note
 
 **This entire project was vibe-coded with ChatGPT.**
