@@ -12,6 +12,8 @@ The RTL-SDR is the RF front end. The 3DS handles the scanner logic, FM demodulat
 
 **This entire project was vibe-coded with ChatGPT.**
 
+3DS-SDR is experimental software and should be used at your own risk. Bugs and incomplete edge cases are still present, and some features may not yet be fully mature or thoroughly validated. Because development has been highly iterative and AI-assisted, behavior can change quickly between builds and regressions are possible even when a feature appears to be working.
+
 I am publishing the source openly so others can inspect it, test it, point out mistakes, improve the DSP, and contribute fixes.
 
 ## Architecture
