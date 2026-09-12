@@ -10,9 +10,9 @@ The RTL-SDR is the RF front end. The 3DS handles the scanner logic, FM demodulat
 
 ## Development note
 
-**This entire project was vibe-coded with ChatGPT.** I started this project with no prior coding/programming knowledge. I have directed the design and features, tested the software repeatedly on real New Nintendo 3DS hardware, reported bugs and RF/audio behavior, and iterated with ChatGPT to generate and modify the code.
+**This entire project was vibe-coded with ChatGPT.**
 
-That means this is an experimental, enthusiast-built project rather than software written through a traditional development background. I am publishing the source openly so others can inspect it, test it, point out mistakes, improve the DSP, and contribute fixes.
+I am publishing the source openly so others can inspect it, test it, point out mistakes, improve the DSP, and contribute fixes.
 
 ## Architecture
 
