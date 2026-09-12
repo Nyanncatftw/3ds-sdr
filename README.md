@@ -8,6 +8,12 @@ The RTL-SDR is the RF front end. The 3DS handles the scanner logic, FM demodulat
 >
 > Based on internal development build **v21.13d**.
 
+## Development note
+
+**This entire project was vibe-coded with ChatGPT.** I started this project with no prior coding/programming knowledge. I have directed the design and features, tested the software repeatedly on real New Nintendo 3DS hardware, reported bugs and RF/audio behavior, and iterated with ChatGPT to generate and modify the code.
+
+That means this is an experimental, enthusiast-built project rather than software written through a traditional development background. I am publishing the source openly so others can inspect it, test it, point out mistakes, improve the DSP, and contribute fixes.
+
 ## Architecture
 
 ```text
@@ -82,7 +88,7 @@ The 3DS sends the sample-rate, frequency, and tuner commands after connecting.
 
 ## Build
 
-This repository intentionally does **not** include a prebuilt binary. Build the current source with devkitPro/devkitARM and libctru.
+Prebuilt releases are provided when available. You can also build the current source yourself with devkitPro/devkitARM and libctru.
 
 With a working devkitPro 3DS environment:
 
