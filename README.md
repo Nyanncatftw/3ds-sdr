@@ -86,9 +86,27 @@ The 3DS sends the sample-rate, frequency, and tuner commands after connecting.
 
 **Security note:** `rtl_tcp` does not provide authentication or encryption. Run it only on a trusted LAN or behind an appropriate private network/VPN; do not expose it directly to the public Internet.
 
-## Build
+## Download / install
 
-Prebuilt releases are provided when available. You can also build the current source yourself with devkitPro/devkitARM and libctru.
+A prebuilt **v0.1.0-beta** binary is included in this repository:
+
+[`release/3ds-sdr.3dsx`](release/3ds-sdr.3dsx)
+
+SHA-256:
+
+```text
+9c21ed3be9dda91ff29788d2940a69d9802be679d92baec6f108bb0e5c93b5a0
+```
+
+Copy `3ds-sdr.3dsx` to your SD card, for example:
+
+```text
+sdmc:/3ds/3ds-sdr/3ds-sdr.3dsx
+```
+
+## Build from source
+
+You can also build the current source yourself with devkitPro/devkitARM and libctru.
 
 With a working devkitPro 3DS environment:
 
@@ -102,12 +120,6 @@ Successful compilation creates:
 ```text
 3ds-sdr.3dsx
 3ds-sdr.elf
-```
-
-Copy `3ds-sdr.3dsx` to a folder on the SD card, for example:
-
-```text
-sdmc:/3ds/3ds-sdr/3ds-sdr.3dsx
 ```
 
 The application stores its runtime configuration in:
