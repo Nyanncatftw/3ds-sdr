@@ -1,0 +1,17 @@
+# devkitARM / 3DS build output
+/build/
+*.o
+*.d
+*.elf
+*.3dsx
+*.smdh
+*.map
+*.lst
+
+# Editor / OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*~
+*.swp
