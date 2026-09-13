@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — post-v0.1.0-beta scanner hotfix
+
+- NFM now uses a lower-latency buffering policy: ~200 ms IQ startup/target, 64 ms audio prebuffer, ~43 ms NDSP queue, and a smaller software-audio target.
+- WFM keeps the existing v0.1.0-beta buffering unchanged for stable, interruption-free broadcast audio.
+- NFM scan acquisition now evaluates fresh post-retune rtl_tcp IQ directly instead of waiting for the playback jitter buffer, so an already-active channel can open squelch and stop scanning in time.
+- The NFM demodulation/filter chain, WFM DSP, scanner resume modes, config format, and memory database are unchanged.
+
 ## v0.1.0-beta — first public release
 
 - First public beta of 3DS-SDR.

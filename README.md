@@ -8,6 +8,8 @@ The RTL-SDR is the RF front end. The 3DS handles the scanner logic, FM demodulat
 >
 > Based on internal development build **v21.13d**.
 
+> **Source hotfix note:** the current source tree includes post-beta NFM latency and scan-acquisition fixes. The prebuilt `release/3ds-sdr.3dsx` remains the original v0.1.0-beta binary until a newly compiled/tested binary is published.
+
 ## Screenshots
 
 ### Scanner / spectrum scope

@@ -29,9 +29,14 @@ extern u32 __ctru_linear_heap_size;
 #define WBFM_FIR_TAPS    121
 #define NFM_IQ_FIR_TAPS   63
 #define AUDIO_FIFO_SAMPLES 32768
-#define AUDIO_PREBUFFER_SAMPLES 12000  // 250 ms @ 48 kHz; near sync target
-#define NDSP_TARGET_BUFS 4             // ~85 ms queued in NDSP
-#define AUDIO_TARGET_SAMPLES 12288      // 256 ms, 37.5% of FIFO
+// WFM keeps the public beta buffering unchanged for uninterrupted music/audio.
+#define AUDIO_PREBUFFER_SAMPLES 12000  // WFM: 250 ms @ 48 kHz; near sync target
+#define NDSP_TARGET_BUFS 4             // WFM: ~85 ms queued in NDSP
+#define AUDIO_TARGET_SAMPLES 12288      // WFM: 256 ms, 37.5% of FIFO
+// NFM is intentionally more responsive for scanner/voice use.
+#define NFM_AUDIO_PREBUFFER_SAMPLES 3072 // 64 ms @ 48 kHz
+#define NFM_NDSP_TARGET_BUFS 2           // ~43 ms queued in NDSP
+#define NFM_AUDIO_TARGET_SAMPLES 4096    // ~85 ms software FIFO target
 #define RESAMP_MIN_STEP 0.9950f         // +~5025 ppm output correction
 #define RESAMP_MAX_STEP 1.0050f         // -~4975 ppm output correction
 #define RESAMP_KP 0.0030f
@@ -41,8 +46,12 @@ extern u32 __ctru_linear_heap_size;
 // Raw rtl_tcp jitter buffer. 524288 bytes at 240 ksps (2 bytes/complex sample)
 // gives about 1.09 seconds of elasticity.
 #define IQ_FIFO_BYTES       1048576U
-#define IQ_FIFO_START_BYTES  393216U   // 37.5%, ~819 ms @ 240 ksps
-#define IQ_FIFO_TARGET_BYTES 393216U   // 37.5%
+// WFM keeps the public beta jitter-buffer depth unchanged.
+#define IQ_FIFO_START_BYTES  393216U   // WFM: 37.5%, ~819 ms @ 240 ksps
+#define IQ_FIFO_TARGET_BYTES 393216U   // WFM: 37.5%
+// NFM uses a shallower reservoir so carrier/scope/audio respond much sooner.
+#define NFM_IQ_FIFO_START_BYTES   96000U // 200 ms @ 240 ksps (480 kB/s IQ)
+#define NFM_IQ_FIFO_TARGET_BYTES  96000U // 200 ms target
 #define IQ_PACE_MIN          0.9950f
 #define IQ_PACE_MAX          1.0050f
 #define IQ_PACE_KP           0.0060f
@@ -64,6 +73,9 @@ typedef enum {
     MODE_NFM = 0,
     MODE_WBFM = 1
 } RadioMode;
+
+// Audio buffering policy follows the active demodulation mode.
+static RadioMode g_audio_buffer_mode = MODE_WBFM;
 
 typedef struct {
     int sock;
@@ -229,6 +241,28 @@ static float g_sql_center_power = 1.0e-9f;
 static float g_sql_adj_power = 1.0e-9f;
 static bool g_sql_metric_valid = false;
 static u32 g_sql_metric_samples = 0;
+
+/*
+ * Low-latency NFM scan detector.  The normal squelch metric above follows the
+ * paced/jitter-buffered DSP stream, which is ideal for stable playback but can
+ * be too far behind live RF for scanner channel decisions.  While scanning NFM
+ * channels, this second detector is fed directly from newly received rtl_tcp IQ
+ * after the retune discard window.  It is used only to decide whether SCAN
+ * should stop on the current channel; demod/audio/scope continue to use the
+ * regular buffered DSP path.
+ */
+static float g_scanfast_dc_i = 0.0f;
+static float g_scanfast_dc_q = 0.0f;
+static float g_scanfast_lp_i = 0.0f;
+static float g_scanfast_lp_q = 0.0f;
+static float g_scanfast_center_power = 1.0e-9f;
+static float g_scanfast_adj_power = 1.0e-9f;
+static bool g_scanfast_metric_valid = false;
+static u32 g_scanfast_metric_samples = 0;
+static bool g_scanfast_candidate_open = false;
+static u64 g_scanfast_candidate_ms = 0;
+static bool g_scanfast_have_i = false;
+static u8 g_scanfast_i_byte = 0;
 
 static bool g_scope_allowed = true;
 static bool g_ui_dirty = true;
@@ -732,6 +766,102 @@ static inline void scanner_channel_metric_sample(RadioMode mode,float i,float q)
         g_sql_metric_valid=true;
 }
 
+static int scanner_effective_sql(Scanner *s, bool *has_override);
+
+static inline void scanner_scanfast_metric_reset(void)
+{
+    g_scanfast_dc_i=0.0f;
+    g_scanfast_dc_q=0.0f;
+    g_scanfast_lp_i=0.0f;
+    g_scanfast_lp_q=0.0f;
+    g_scanfast_center_power=1.0e-9f;
+    g_scanfast_adj_power=1.0e-9f;
+    g_scanfast_metric_valid=false;
+    g_scanfast_metric_samples=0;
+    g_scanfast_candidate_open=false;
+    g_scanfast_candidate_ms=osGetTime();
+    g_scanfast_have_i=false;
+    g_scanfast_i_byte=0;
+}
+
+static inline void scanner_scanfast_metric_pair(u8 ib,u8 qb)
+{
+    float i=((float)ib-128.0f)*(1.0f/128.0f);
+    float q=((float)qb-128.0f)*(1.0f/128.0f);
+
+    const float dc_a=0.00016f;
+    g_scanfast_dc_i += dc_a*(i-g_scanfast_dc_i);
+    g_scanfast_dc_q += dc_a*(q-g_scanfast_dc_q);
+    float x=i-g_scanfast_dc_i;
+    float y=q-g_scanfast_dc_q;
+
+    const float lp_a=0.204f;
+    g_scanfast_lp_i += lp_a*(x-g_scanfast_lp_i);
+    g_scanfast_lp_q += lp_a*(y-g_scanfast_lp_q);
+
+    float ri=x-g_scanfast_lp_i;
+    float rq=y-g_scanfast_lp_q;
+    float center=g_scanfast_lp_i*g_scanfast_lp_i + g_scanfast_lp_q*g_scanfast_lp_q;
+    float adjacent=ri*ri + rq*rq;
+
+    const float pa=0.00363f;
+    g_scanfast_center_power += pa*(center-g_scanfast_center_power);
+    g_scanfast_adj_power += pa*(adjacent-g_scanfast_adj_power);
+
+    if(g_scanfast_metric_samples<1000000U) g_scanfast_metric_samples++;
+    if(g_scanfast_metric_samples>=960U) g_scanfast_metric_valid=true;
+}
+
+static void scanner_scanfast_feed(const u8 *buf,u32 bytes)
+{
+    u32 n=0;
+    if(g_scanfast_have_i && bytes>0){
+        scanner_scanfast_metric_pair(g_scanfast_i_byte,buf[0]);
+        g_scanfast_have_i=false;
+        n=1;
+    }
+    for(;n+1<bytes;n+=2)
+        scanner_scanfast_metric_pair(buf[n],buf[n+1]);
+    if(n<bytes){
+        g_scanfast_i_byte=buf[n];
+        g_scanfast_have_i=true;
+    }
+}
+
+static void scanner_scanfast_update_squelch(Scanner *s,u64 now)
+{
+    if(!g_scanfast_metric_valid) return;
+
+    float center_db=10.0f*log10f(g_scanfast_center_power+1.0e-12f);
+    float adj_db=10.0f*log10f(g_scanfast_adj_power+1.0e-12f);
+    float margin_db=center_db-adj_db;
+
+    int effSql=scanner_effective_sql(s,NULL);
+    float open_margin_db=-1.5f + (float)effSql*0.195f;
+    bool want_open=margin_db>=open_margin_db;
+
+    if(want_open!=g_scanfast_candidate_open){
+        g_scanfast_candidate_open=want_open;
+        g_scanfast_candidate_ms=now;
+    }
+
+    if(want_open && !s->squelch_open &&
+       now-g_scanfast_candidate_ms>=SCAN_OPEN_MS){
+        s->squelch_open=true;
+        s->sql_candidate_open=true;
+        s->sql_candidate_ms=now;
+        s->rf_db=center_db;
+        s->noise_db=adj_db;
+        s->margin_db=margin_db;
+        s->open_margin_db=open_margin_db;
+        s->close_margin_db=open_margin_db-2.5f;
+        s->hits++;
+        ScanChannel *hc=scanner_channel(s);
+        if(!s->vfo_mode && hc) hc->hit_count++;
+        scanner_ui_dirty();
+    }
+}
+
 static inline void scanner_channel_metric_reset(void)
 {
     g_sql_dc_i=0.0f;
@@ -1145,7 +1275,32 @@ static u32 iq_fifo_write_bytes(const u8 *src, u32 count)
     return count;
 }
 
-static inline void iq_pace_control_update(void)
+static inline u32 iq_start_bytes_for_mode(RadioMode mode)
+{
+    return mode == MODE_NFM ? NFM_IQ_FIFO_START_BYTES : IQ_FIFO_START_BYTES;
+}
+
+static inline u32 iq_target_bytes_for_mode(RadioMode mode)
+{
+    return mode == MODE_NFM ? NFM_IQ_FIFO_TARGET_BYTES : IQ_FIFO_TARGET_BYTES;
+}
+
+static inline u32 audio_prebuffer_for_mode(RadioMode mode)
+{
+    return mode == MODE_NFM ? NFM_AUDIO_PREBUFFER_SAMPLES : AUDIO_PREBUFFER_SAMPLES;
+}
+
+static inline u32 audio_target_for_mode(RadioMode mode)
+{
+    return mode == MODE_NFM ? NFM_AUDIO_TARGET_SAMPLES : AUDIO_TARGET_SAMPLES;
+}
+
+static inline int ndsp_target_bufs_for_mode(RadioMode mode)
+{
+    return mode == MODE_NFM ? NFM_NDSP_TARGET_BUFS : NDSP_TARGET_BUFS;
+}
+
+static inline void iq_pace_control_update(const Radio *r)
 {
     u64 now = osGetTime();
     if (now - g_iq_last_control_ms < IQ_PACE_CONTROL_MS)
@@ -1153,7 +1308,8 @@ static inline void iq_pace_control_update(void)
 
     g_iq_last_control_ms = now;
 
-    float err = ((float)iqFifoCount - (float)IQ_FIFO_TARGET_BYTES) /
+    const u32 target = iq_target_bytes_for_mode(r->mode);
+    float err = ((float)iqFifoCount - (float)target) /
                 (float)IQ_FIFO_BYTES;
 
     g_iq_pace_integral += err;
@@ -1172,6 +1328,7 @@ static inline void audio_fifo_reset(void);
 static void radio_set_mode(Radio *r, RadioMode mode)
 {
     r->mode = mode;
+    g_audio_buffer_mode = mode;
     r->prev_i = r->prev_q = 0.0f;
     r->box_i = r->box_q = 0;
     r->box_count = 0;
@@ -1338,7 +1495,8 @@ static inline void resampler_control_update(void)
     // Positive error = FIFO too full -> step grows -> slightly fewer output
     // samples. Negative error = FIFO too empty -> step shrinks -> slightly
     // more output samples.
-    float err = ((float)audioFifoCount - (float)AUDIO_TARGET_SAMPLES) /
+    const u32 target = audio_target_for_mode(g_audio_buffer_mode);
+    float err = ((float)audioFifoCount - (float)target) /
                 (float)AUDIO_FIFO_SAMPLES;
 
     // PI control handles both short occupancy displacement and persistent
@@ -1439,20 +1597,21 @@ static void audio_pump(void)
 {
     int busy = count_busy_wavebufs();
 
-    // Startup and underrun recovery deliberately wait for about 200 ms of PCM
-    // before feeding NDSP. This converts bursty TCP/DSP production into a
-    // steady 48 kHz consumer stream.
+    // WFM retains the public beta's deep startup/recovery reservoir. NFM uses
+    // a much smaller reservoir so voice/scanner reception feels responsive.
+    const u32 prebuffer = audio_prebuffer_for_mode(g_audio_buffer_mode);
+    const int target_bufs = ndsp_target_bufs_for_mode(g_audio_buffer_mode);
     if (g_audio_rebuffering) {
-        if (audioFifoCount < AUDIO_PREBUFFER_SAMPLES)
+        if (audioFifoCount < prebuffer)
             return;
 
         finish_rebuffer();
         busy = count_busy_wavebufs();
     }
 
-    // Keep only a modest hardware queue (~85 ms) filled. The rest remains in
-    // the software FIFO where it acts as the actual jitter reservoir.
-    while (audioFifoCount >= AUDIO_SAMPLES && busy < NDSP_TARGET_BUFS) {
+    // WFM keeps the original ~85 ms NDSP queue; NFM keeps about ~43 ms.
+    // The remainder stays in the software FIFO as the jitter reservoir.
+    while (audioFifoCount >= AUDIO_SAMPLES && busy < target_bufs) {
         int chosen = -1;
 
         for (int n = 0; n < AUDIO_BUFS; n++) {
@@ -1489,8 +1648,8 @@ static void audio_pump(void)
     }
 
     // A genuine underrun is when NDSP has consumed every queued block and the
-    // FIFO cannot provide another complete one. Do not restart on one tiny
-    // chunk; enter rebuffer mode and wait for the full 200 ms threshold.
+    // FIFO cannot provide another complete one. Re-enter the mode-specific
+    // rebuffer threshold rather than restarting on one tiny chunk.
     if (g_audio_started_once && busy == 0 && audioFifoCount < AUDIO_SAMPLES) {
         begin_rebuffer();
     }
@@ -1742,7 +1901,7 @@ static u32 process_iq(Radio *r, const u8 *buf, int bytes)
 static u32 iq_process_paced(Radio *r, u8 *scratch, u32 scratchBytes)
 {
     if (!g_iq_started) {
-        if (iqFifoCount < IQ_FIFO_START_BYTES)
+        if (iqFifoCount < iq_start_bytes_for_mode(r->mode))
             return 0;
 
         g_iq_started = true;
@@ -1750,7 +1909,7 @@ static u32 iq_process_paced(Radio *r, u8 *scratch, u32 scratchBytes)
         g_iq_credit = 0.0;
     }
 
-    iq_pace_control_update();
+    iq_pace_control_update(r);
 
     u64 now = osGetTime();
     u64 elapsed = now - g_iq_last_pace_ms;
@@ -2659,6 +2818,7 @@ static void radio_retune_reset(Radio *r)
     fftRetunePending = true;
 
     scanner_channel_metric_reset();
+    scanner_scanfast_metric_reset();
     g_scan.rf_db = -60.0f;
     g_scan.noise_db = -60.0f;
     g_scan.margin_db = 0.0f;
@@ -2789,7 +2949,14 @@ static void scanner_next(Scanner *s, Radio *r, int dir)
 
 static void scanner_tick(Scanner *s, Radio *r, u64 now)
 {
-    scanner_update_squelch(s, now);
+    /* During NFM scan acquisition, use the fresh rtl_tcp detector so the
+     * scanner does not outrun the jitter-buffered DSP stream.  Once a channel
+     * is captured (or while held/VFO), normal buffered squelch takes over. */
+    bool nfm_fast_scan = !s->vfo_mode && scanner_is_scanning(s) &&
+                         r->mode==MODE_NFM &&
+                         (s->state==SCANNER_SETTLE || s->state==SCANNER_CHECK);
+    if(nfm_fast_scan) scanner_scanfast_update_squelch(s,now);
+    else scanner_update_squelch(s, now);
 
     if (s->vfo_mode || scanner_is_hold(s)) {
         /* HOLD may update squelch/audio status, but it can never enter the
@@ -3685,6 +3852,15 @@ int main(int argc, char **argv)
                      * drain rtl_tcp but do not let stale IQ enter the DSP FIFO. */
                     continue;
                 }
+
+                /* NFM scanner acquisition watches the newest post-retune IQ
+                 * directly, bypassing the playback jitter buffer.  This lets a
+                 * continuously keyed simplex/FRS signal stop the scanner before
+                 * the buffered DSP path has caught up. */
+                if(r.mode==MODE_NFM && !g_scan.vfo_mode &&
+                   scanner_is_scanning(&g_scan) &&
+                   (g_scan.state==SCANNER_SETTLE || g_scan.state==SCANNER_CHECK))
+                    scanner_scanfast_feed(iqbuf,(u32)n);
 
                 iq_fifo_write_bytes(iqbuf, (u32)n);
             } else if (n == 0) {
