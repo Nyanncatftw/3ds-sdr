@@ -9,6 +9,8 @@ The RTL-SDR is the RF front end. The 3DS handles the scanner logic, FM demodulat
 > Based on internal development build **v21.13d**.
 
 > **Scanner hotfix:** the current source tree contains the hardware-tested scanner synchronization fixes. NFM scanning is deliberately conservative and may be slower than a dedicated scanner, prioritizing correct frequency association and reliable holds.
+>
+> **Menu update:** the current source also includes the dev11-based hierarchical firmware menu with Memories, Banks, Scan Settings, VFO, Display, and System pages.
 
 ## Screenshots
 
@@ -64,6 +66,7 @@ The default `rtl_tcp` port is **1234**. On startup the 3DS presents a server-IP 
 ## Features
 
 - Conventional analog scanner with banks and channel memories
+- Hierarchical firmware-style menu for Memories, Banks, Scan Settings, VFO, Display, and System
 - VFO mode
 - NFM voice receive
 - WBFM broadcast receive
@@ -111,7 +114,9 @@ The 3DS sends the sample-rate, frequency, and tuner commands after connecting.
 
 ## Download / install
 
-The **current source tree** includes the tested scanner-hotfix changes described in the changelog.
+The **current source tree** includes the tested scanner-hotfix changes plus the newer dev11-based hierarchical menu described in the changelog.
+
+**Binary note:** until the release binary is refreshed, the prebuilt below is the previous user-compiled scanner-hotfix build and may not yet contain the new menu.
 
 A user-compiled, hardware-tested scanner-hotfix binary is included here:
 
@@ -183,8 +188,12 @@ No `rtl_tcp` connection is initiated until the server address is confirmed.
 | **R** | Temporary avoid |
 | **L (hold)** | Temporary monitor |
 | **ZL / ZR** | Squelch down / up |
-| **SELECT** | Diagnostics |
+| **SELECT** | Unbound (available for system screenshot hotkeys) |
 | **START** | Exit |
+
+### Menu
+
+Press **Y** to open the hierarchical menu. Use Up/Down to select, **A** to open/activate, **B** to go back, and **Y** to close. The Memories browser also uses Left/Right to change banks, **X** to listen/hold on the selected memory, and **R** for temporary avoid. Diagnostics are under **System**.
 
 ### VFO
 
