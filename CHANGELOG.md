@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.1.0-beta menu update — 2026-09-13
+
+- Reimplemented the menu on top of the known-good dev11 scanner/receiver baseline rather than carrying forward the older tabbed menu architecture.
+- Added a hierarchical firmware-style home menu with **Memories**, **Banks**, **Scan Settings**, **VFO**, **Display**, and **System** pages.
+- Added dedicated memory and bank browsers with focused per-memory/per-bank option pages.
+- Menu browsing is separated from live receiver state; merely opening or navigating the menu does not stop scanning or retune the radio.
+- Explicit **LISTEN / HOLD HERE** promotes the selected memory into the existing dev11 HOLD/tune path.
+- Diagnostics moved to **System** and SELECT is intentionally unbound for system screenshot hotkeys.
+- Scanner synchronization, NFM/WFM DSP, IQ/audio FIFO policies, detector behavior, audio pipeline, and the 250 ms NFM retune quarantine remain based on the hardware-tested dev11 line.
+- Source has been published first; the prebuilt release binary will be refreshed separately after local compilation/hardware testing.
+
 ## v0.1.0-beta scanner hotfix — 2026-09-13
 
 - Replaced the fragile first public scanner acquisition behavior with the hardware-tested NFM scan path from the dev11 line.
