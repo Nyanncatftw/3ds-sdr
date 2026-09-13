@@ -11,7 +11,7 @@
 - Removed the separate **Scope on Hit** behavior. RADIO / SCOPE / WATERFALL is now the persistent display selection; idle scanning keeps the radio/status screens visible, and the selected visualization appears on RECEIVE or HOLD.
 - The existing scanner config remains backward-compatible; the old Scope on Hit field is accepted and ignored.
 - NFM demodulation/voice filtering and WFM DSP are otherwise unchanged.
-- The repository prebuilt binary is refreshed with the user-compiled, hardware-tested hotfix build.
+- A user-compiled, hardware-tested hotfix binary exists, but the repository prebuilt remains the earlier v0.1.0-beta binary until that file is replaced.
 
 ## v0.1.0-beta — first public release
 
