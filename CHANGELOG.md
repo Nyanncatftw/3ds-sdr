@@ -1,11 +1,17 @@
 # Changelog
 
-## Unreleased — post-v0.1.0-beta scanner hotfix
+## v0.1.0-beta scanner hotfix — 2026-09-13
 
-- NFM now uses a lower-latency buffering policy: ~200 ms IQ startup/target, 64 ms audio prebuffer, ~43 ms NDSP queue, and a smaller software-audio target.
-- WFM keeps the existing v0.1.0-beta buffering unchanged for stable, interruption-free broadcast audio.
-- NFM scan acquisition now evaluates fresh post-retune rtl_tcp IQ directly instead of waiting for the playback jitter buffer, so an already-active channel can open squelch and stop scanning in time.
-- The NFM demodulation/filter chain, WFM DSP, scanner resume modes, config format, and memory database are unchanged.
+- Replaced the fragile first public scanner acquisition behavior with the hardware-tested NFM scan path from the dev11 line.
+- The live NFM scan detector no longer adaptively subtracts a centered carrier as DC, preventing a continuously keyed channel from opening briefly and then disappearing.
+- The live NFM detector remains authoritative through CHECK / RECEIVE / DELAY and uses close hysteresis/debounce so CARRIER mode stays on an active transmission and resumes after carrier drop.
+- NFM now uses a recency-first IQ FIFO: about 50 ms startup, 100 ms target, and a 200 ms hard queue ceiling. When necessary, the oldest stale IQ is discarded instead of preserving seconds of obsolete RF history. WFM keeps its deeper continuity-first buffering.
+- Scan acquisition keeps detector history across SETTLE instead of resetting again immediately before CHECK.
+- Scanner retunes drain already-queued socket IQ and apply a 250 ms NFM retune quarantine before acquisition. This intentionally slows scanning, but prevents delayed samples from the previous channel being attributed to the frequency currently shown on screen.
+- Removed the separate **Scope on Hit** behavior. RADIO / SCOPE / WATERFALL is now the persistent display selection; idle scanning keeps the radio/status screens visible, and the selected visualization appears on RECEIVE or HOLD.
+- The existing scanner config remains backward-compatible; the old Scope on Hit field is accepted and ignored.
+- NFM demodulation/voice filtering and WFM DSP are otherwise unchanged.
+- The repository prebuilt binary is refreshed with the user-compiled, hardware-tested hotfix build.
 
 ## v0.1.0-beta — first public release
 

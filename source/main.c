@@ -50,8 +50,9 @@ extern u32 __ctru_linear_heap_size;
 #define IQ_FIFO_START_BYTES  393216U   // WFM: 37.5%, ~819 ms @ 240 ksps
 #define IQ_FIFO_TARGET_BYTES 393216U   // WFM: 37.5%
 // NFM uses a shallower reservoir so carrier/scope/audio respond much sooner.
-#define NFM_IQ_FIFO_START_BYTES   96000U // 200 ms @ 240 ksps (480 kB/s IQ)
-#define NFM_IQ_FIFO_TARGET_BYTES  96000U // 200 ms target
+#define NFM_IQ_FIFO_START_BYTES   24000U // 50 ms startup @ 240 ksps (480 kB/s IQ)
+#define NFM_IQ_FIFO_TARGET_BYTES  48000U // 100 ms live target
+#define NFM_IQ_FIFO_MAX_BYTES     96000U // 200 ms hard latency ceiling
 #define IQ_PACE_MIN          0.9950f
 #define IQ_PACE_MAX          1.0050f
 #define IQ_PACE_KP           0.0060f
@@ -129,7 +130,8 @@ typedef struct {
 #define SCAN_MAX_BANKS       12
 #define SCAN_MAX_CHANNELS    48
 #define SCAN_NAME_LEN        24
-#define SCAN_SETTLE_MS       90
+#define SCAN_SETTLE_MS       120
+#define SCAN_CHECK_MS        220
 #define SCAN_OPEN_MS         25
 #define SCAN_CLOSE_MS        120
 #define SCAN_TIME_HOLD_MS    5000
@@ -199,7 +201,6 @@ typedef struct {
 
     // Firmware/UI state
     bool scope_visible;
-    bool scope_on_hit;
     int scope_screen;       // 0 = bottom, 1 = top
     int scope_overlay;      // 0 = off, 1 = minimal, 2 = full
     bool hold_audio_monitor; // false=squelched, true=forced open while HOLD
@@ -304,6 +305,7 @@ static char g_freq_edit_title[40] = {0};
  * pre-change network backlog can never enter the new DSP pipeline. */
 static u64 g_rx_discard_until_ms = 0;
 #define RX_RETUNE_DISCARD_MS 45
+#define NFM_RX_RETUNE_DISCARD_MS 250
 static u32 g_rtl_cmd_failures = 0;
 
 /* Confirmed rtl_tcp server for this session.  Loaded from a tiny separate
@@ -428,7 +430,6 @@ static void scanner_defaults(Scanner *s)
     s->scanning = false;
     s->state = SCANNER_STOPPED;
     s->scope_visible = false;
-    s->scope_on_hit = false;
     s->scope_screen = 0;
     s->scope_overlay = 1;
     s->hold_audio_monitor = false;
@@ -486,7 +487,7 @@ static void scanner_save(const Scanner *s)
     if (!f) return;
 
     fprintf(f, "V21|%d|%d|%d|%u|%u|%d|%d|%d|%d|%d\n",
-            (int)s->resume_mode, s->sql_level, s->scope_on_hit?1:0,
+            (int)s->resume_mode, s->sql_level, 0, /* legacy scope-on-hit slot */
             (unsigned)s->time_hold_ms, (unsigned)s->vfo_freq_hz,
             (int)s->vfo_radio_mode, s->vfo_step_index,
             s->scope_screen, s->scope_overlay,
@@ -557,7 +558,8 @@ static void scanner_load(Scanner *s)
                        &rm,&sql,&scope,&th,&vf,&vm,&vsi,&sscreen,&soverlay,&holdmon)>=4) {
                 tmp.resume_mode=(rm<0||rm>2)?SCAN_RESUME_DELAY:(ScanResumeMode)rm;
                 tmp.sql_level=sql<0?0:(sql>100?100:sql);
-                tmp.scope_on_hit=scope!=0; tmp.time_hold_ms=th; tmp.vfo_freq_hz=vf;
+                (void)scope; /* legacy scope-on-hit field: accepted but ignored */
+                tmp.time_hold_ms=th; tmp.vfo_freq_hz=vf;
                 tmp.vfo_radio_mode=vm==MODE_NFM?MODE_NFM:MODE_WBFM;
                 tmp.vfo_step_index=vsi<0?0:(vsi>=STEP_COUNT?STEP_COUNT-1:vsi);
                 tmp.scope_screen=(sscreen==1)?1:0;
@@ -789,11 +791,13 @@ static inline void scanner_scanfast_metric_pair(u8 ib,u8 qb)
     float i=((float)ib-128.0f)*(1.0f/128.0f);
     float q=((float)qb-128.0f)*(1.0f/128.0f);
 
-    const float dc_a=0.00016f;
-    g_scanfast_dc_i += dc_a*(i-g_scanfast_dc_i);
-    g_scanfast_dc_q += dc_a*(q-g_scanfast_dc_q);
-    float x=i-g_scanfast_dc_i;
-    float y=q-g_scanfast_dc_q;
+    /* dev5 diagnostic: do NOT adaptively subtract the centered I/Q vector
+     * in the live NFM scan detector. A correctly tuned unmodulated FM carrier
+     * appears close to DC at complex baseband, so the former ~26 ms DC
+     * estimator could learn and cancel the very carrier SCAN was trying to
+     * track. The normal buffered DSP/squelch path is intentionally untouched. */
+    float x=i;
+    float y=q;
 
     const float lp_a=0.204f;
     g_scanfast_lp_i += lp_a*(x-g_scanfast_lp_i);
@@ -838,27 +842,46 @@ static void scanner_scanfast_update_squelch(Scanner *s,u64 now)
 
     int effSql=scanner_effective_sql(s,NULL);
     float open_margin_db=-1.5f + (float)effSql*0.195f;
-    bool want_open=margin_db>=open_margin_db;
+    float close_margin_db=open_margin_db-2.5f;
+
+    /* Once NFM SCAN is active, this fresh-IQ detector owns carrier state for
+     * the complete CHECK -> RECEIVE -> DELAY lifecycle.  Use the same
+     * hysteresis/debounce policy as normal squelch so a brief fade cannot
+     * immediately kick the scanner off an active simplex transmission. */
+    bool want_open=s->squelch_open
+        ? (margin_db>=close_margin_db)
+        : (margin_db>=open_margin_db);
 
     if(want_open!=g_scanfast_candidate_open){
         g_scanfast_candidate_open=want_open;
         g_scanfast_candidate_ms=now;
     }
 
-    if(want_open && !s->squelch_open &&
-       now-g_scanfast_candidate_ms>=SCAN_OPEN_MS){
-        s->squelch_open=true;
-        s->sql_candidate_open=true;
+    u64 need=want_open?SCAN_OPEN_MS:SCAN_CLOSE_MS;
+    if(want_open!=s->squelch_open &&
+       now-g_scanfast_candidate_ms>=need){
+        bool was_open=s->squelch_open;
+        s->squelch_open=want_open;
+        s->sql_candidate_open=want_open;
         s->sql_candidate_ms=now;
         s->rf_db=center_db;
         s->noise_db=adj_db;
         s->margin_db=margin_db;
         s->open_margin_db=open_margin_db;
-        s->close_margin_db=open_margin_db-2.5f;
-        s->hits++;
-        ScanChannel *hc=scanner_channel(s);
-        if(!s->vfo_mode && hc) hc->hit_count++;
+        s->close_margin_db=close_margin_db;
+        if(want_open && !was_open){
+            s->hits++;
+            ScanChannel *hc=scanner_channel(s);
+            if(!s->vfo_mode && hc) hc->hit_count++;
+        }
         scanner_ui_dirty();
+    }else{
+        /* Keep live detector telemetry current while staying in the same state. */
+        s->rf_db=center_db;
+        s->noise_db=adj_db;
+        s->margin_db=margin_db;
+        s->open_margin_db=open_margin_db;
+        s->close_margin_db=close_margin_db;
     }
 }
 
@@ -974,6 +997,7 @@ static u32 iqFifoRead = 0;
 static u32 iqFifoWrite = 0;
 static u32 iqFifoCount = 0;
 static u32 g_iq_overruns = 0;
+static u64 g_iq_latency_drops = 0;
 static u64 g_iq_accepted_bytes = 0;
 static u64 g_iq_dsp_pairs = 0;
 static bool g_iq_started = false;
@@ -1229,6 +1253,7 @@ static inline void iq_fifo_reset(void)
     iqFifoWrite = 0;
     iqFifoCount = 0;
     g_iq_overruns = 0;
+    g_iq_latency_drops = 0;
     g_iq_accepted_bytes = 0;
     g_iq_dsp_pairs = 0;
     g_iq_started = false;
@@ -1246,8 +1271,46 @@ static inline u32 iq_fifo_space(void)
     return IQ_FIFO_BYTES - iqFifoCount;
 }
 
-static u32 iq_fifo_write_bytes(const u8 *src, u32 count)
+static inline void iq_fifo_drop_oldest(u32 count)
 {
+    if (count > iqFifoCount) count = iqFifoCount;
+    /* Always preserve I/Q byte alignment. */
+    count &= ~1U;
+    if (!count) return;
+
+    iqFifoRead = (iqFifoRead + count) % IQ_FIFO_BYTES;
+    iqFifoCount -= count;
+    g_iq_latency_drops += count;
+}
+
+static u32 iq_fifo_write_bytes_mode(const u8 *src, u32 count, RadioMode mode)
+{
+    /*
+     * NFM is a live scanner path: stale RF is worse than a discontinuity.
+     * Enforce a hard 200 ms queue ceiling by dropping the OLDEST IQ before
+     * accepting new samples.  WFM retains the original deep elasticity FIFO
+     * and never uses this latency trim.
+     */
+    if (mode == MODE_NFM) {
+        count &= ~1U;
+
+        /* If one socket burst itself exceeds the live window, retain only the
+         * newest part of that burst. */
+        if (count > NFM_IQ_FIFO_MAX_BYTES) {
+            u32 skip = count - NFM_IQ_FIFO_MAX_BYTES;
+            skip = (skip + 1U) & ~1U;
+            src += skip;
+            count -= skip;
+            g_iq_latency_drops += skip;
+        }
+
+        if (iqFifoCount + count > NFM_IQ_FIFO_MAX_BYTES) {
+            u32 drop = iqFifoCount + count - NFM_IQ_FIFO_MAX_BYTES;
+            drop = (drop + 1U) & ~1U;
+            iq_fifo_drop_oldest(drop);
+        }
+    }
+
     u32 space = iq_fifo_space();
     if (count > space) {
         g_iq_overruns += count - space;
@@ -2387,10 +2450,11 @@ static void ui_control_status(UiSurface *s,const Radio *r)
     ui_text(s,166,164,"L MONITOR",2,C_TEXT);
     ui_text(s,166,183,"ZL/ZR SQL",2,C_TEXT);
     ui_textf(s,8,215,1,C_DIM,"HOLD AUDIO %s",g_scan.hold_audio_monitor?"MONITOR":"SQUELCHED");
-    ui_textf(s,8,228,1,C_DIM,"VIEW %s  %s / %s",
-             (g_scan.scope_visible?(g_waterfall_visible?"WATERFALL":"SCOPE"):"NORMAL"),
-             g_scan.scope_screen?"TOP":"BOTTOM",
-             g_scan.scope_overlay==0?"OFF":(g_scan.scope_overlay==1?"MIN":"FULL"));
+    if(scanner_is_scanning(&g_scan)){
+        ui_textf(s,8,228,1,C_DIM,"VIEW: %s%s",
+                 g_scan.scope_visible?(g_waterfall_visible?"WATERFALL":"SCOPE"):"RADIO",
+                 g_scan.scope_visible?(g_scan.scope_screen?" (TOP)":" (BOTTOM)"):"");
+    }
 }
 
 static void ui_menu(UiSurface *s,const Radio *r)
@@ -2604,9 +2668,13 @@ static void ui_render(const Radio *r,u32 iqPct,u32 afPct)
     }
 
 
-    bool scopeHit=(g_scan.scope_on_hit&&g_scan.squelch_open);
-    bool showScope=(g_scan.scope_visible||scopeHit)&&g_scope_allowed;
-    bool showWaterfall=g_scan.scope_visible&&g_waterfall_visible&&g_scope_allowed;
+    /* The user's selected view is persistent.  During idle scanning we keep
+     * both radio/status screens visible so the changing channel is readable;
+     * once a carrier is received, or whenever scanning is held/stopped, the
+     * selected scope/waterfall view is shown again. */
+    bool scanIdle=scanner_is_scanning(&g_scan)&&!g_scan.squelch_open;
+    bool showScope=g_scan.scope_visible&&g_scope_allowed&&!scanIdle;
+    bool showWaterfall=showScope&&g_waterfall_visible;
     if(showScope)ui_prepare_fft();
     if(g_show_debug) ui_debug(&top,&bottom,r);
     else if(showScope&&g_scan.scope_screen==1){ if(showWaterfall)ui_waterfall(&top,r);else ui_scope(&top,r); if(g_menu_open)ui_menu(&bottom,r);else ui_control_status(&bottom,r); }
@@ -2750,6 +2818,34 @@ static void ui_frequency_editor_bottom(UiSurface *bottom,const char *title,u32 f
 }
 
 
+/* Drain bytes that are already queued on the client socket before issuing a
+ * scanner retune.  rtl_tcp is a continuous untagged IQ stream; without this
+ * barrier, queued samples from the previous channel can be attributed to the
+ * next memory after the UI/state has already advanced.  This is nonblocking
+ * and bounded so a busy stream cannot stall the main loop indefinitely. */
+static u64 radio_drain_queued_iq(int sock)
+{
+    if(sock < 0) return 0;
+
+    u8 scratch[4096];
+    u64 dropped=0;
+    const u64 cap=1048576ULL;
+
+    while(dropped < cap){
+        int n=recv(sock,scratch,sizeof(scratch),0);
+        if(n>0){
+            dropped += (u64)n;
+            continue;
+        }
+        if(n==0) break;
+        if(errno==EAGAIN || errno==EWOULDBLOCK ||
+           errno==EINPROGRESS || errno==EALREADY)
+            break;
+        break;
+    }
+    return dropped;
+}
+
 static u64 flush_initial_iq(int sock, u8 *scratch, u32 scratchBytes, u32 durationMs)
 {
     u64 start = osGetTime();
@@ -2826,9 +2922,12 @@ static void radio_retune_reset(Radio *r)
     g_scan.sql_candidate_open = false;
     g_scan.sql_candidate_ms = osGetTime();
 
-    /* Do not block here. The producer loop will keep draining rtl_tcp while
-     * throwing away any packets that may belong to the pre-retune stream. */
-    g_rx_discard_until_ms = osGetTime() + RX_RETUNE_DISCARD_MS;
+    /* Do not let untagged old-frequency rtl_tcp samples cross a retune.
+     * NFM scanner operation gets a longer quarantine because it makes fast
+     * carrier decisions directly from socket IQ; WFM keeps its existing
+     * public-beta timing. */
+    u32 discard_ms=(r->mode==MODE_NFM)?NFM_RX_RETUNE_DISCARD_MS:RX_RETUNE_DISCARD_MS;
+    g_rx_discard_until_ms = osGetTime() + discard_ms;
 }
 
 static bool radio_reconnect(Radio *r)
@@ -2869,6 +2968,12 @@ static void scanner_tune_current(Scanner *s, Radio *r)
 {
     ScanChannel *c = scanner_channel(s);
     if (!c) return;
+
+    /* First empty the 3DS-side receive queue while it still unambiguously
+     * belongs to the old channel.  After the rtl_tcp retune command, the
+     * normal producer quarantine below drains in-flight/server-buffered IQ
+     * before detector, scope, or audio are allowed to consume it. */
+    (void)radio_drain_queued_iq(r->sock);
 
     r->freq_hz = c->freq_hz;
     if (r->mode != c->mode) {
@@ -2949,14 +3054,21 @@ static void scanner_next(Scanner *s, Radio *r, int dir)
 
 static void scanner_tick(Scanner *s, Radio *r, u64 now)
 {
-    /* During NFM scan acquisition, use the fresh rtl_tcp detector so the
-     * scanner does not outrun the jitter-buffered DSP stream.  Once a channel
-     * is captured (or while held/VFO), normal buffered squelch takes over. */
-    bool nfm_fast_scan = !s->vfo_mode && scanner_is_scanning(s) &&
+    /* Scanner control and playback are deliberately separate for NFM.
+     * While NFM SCAN is active, fresh post-retune rtl_tcp IQ is authoritative
+     * for carrier state through CHECK, RECEIVE, and DELAY.  The shallow
+     * buffered NFM DSP path remains responsible only for audio/scope playback.
+     * WFM keeps the existing buffered squelch/playback behavior unchanged. */
+    bool nfm_live_scan = !s->vfo_mode && scanner_is_scanning(s) &&
                          r->mode==MODE_NFM &&
-                         (s->state==SCANNER_SETTLE || s->state==SCANNER_CHECK);
-    if(nfm_fast_scan) scanner_scanfast_update_squelch(s,now);
-    else scanner_update_squelch(s, now);
+                         (s->state==SCANNER_CHECK ||
+                          s->state==SCANNER_RECEIVE ||
+                          s->state==SCANNER_DELAY);
+    if(nfm_live_scan)
+        scanner_scanfast_update_squelch(s,now);
+    else if(!(scanner_is_scanning(s) && r->mode==MODE_NFM &&
+              s->state==SCANNER_SETTLE))
+        scanner_update_squelch(s,now);
 
     if (s->vfo_mode || scanner_is_hold(s)) {
         /* HOLD may update squelch/audio status, but it can never enter the
@@ -2976,7 +3088,18 @@ static void scanner_tick(Scanner *s, Radio *r, u64 now)
         case SCANNER_SETTLE:
             g_audio_gate_open = false;
             g_scope_allowed = false;
+            /* Do not start the settle clock until the post-retune socket
+             * quarantine has ended.  During the quarantine the producer is
+             * intentionally draining untagged old-frequency IQ. */
+            if(now < g_rx_discard_until_ms)
+                break;
+            if(s->state_since_ms < g_rx_discard_until_ms)
+                s->state_since_ms = g_rx_discard_until_ms;
             if (now - s->state_since_ms >= SCAN_SETTLE_MS) {
+                /* Keep the post-discard scan-fast history gathered during
+                 * SETTLE.  The detector was already reset by the retune path,
+                 * and preserving these fresh samples lets CHECK start with an
+                 * established carrier decision instead of starting cold. */
                 s->state = SCANNER_CHECK;
                 s->state_since_ms = now;
             }
@@ -2988,7 +3111,11 @@ static void scanner_tick(Scanner *s, Radio *r, u64 now)
                 s->state_since_ms = now;
                 g_audio_gate_open = true;
                 g_scope_allowed = true;
-            } else if (now - s->state_since_ms >= 40) {
+            } else if (now - s->state_since_ms >= SCAN_CHECK_MS) {
+                /* Give acquisition enough real post-retune time to make a
+                 * trustworthy decision.  This deliberately favors reliable
+                 * capture over maximum scan speed; ~340 ms total dwell is
+                 * still roughly three idle channels per second. */
                 s->passes++;
                 scanner_next(s, r, +1);
             }
@@ -3376,7 +3503,7 @@ static int remove_duplicate_channels_current_bank(void)
 
 static int menu_item_count(MenuCategory c)
 {
-    static const int n[]={12,6,6,6,4,5};
+    static const int n[]={12,6,5,6,3,5};
     return n[(int)c];
 }
 
@@ -3435,8 +3562,7 @@ static void menu_item_text(MenuCategory cat,int item,char *buf,size_t n)
         case 0: snprintf(buf,n,"Resume: %s",scan_resume_name(g_scan.resume_mode)); break;
         case 1: snprintf(buf,n,"Global SQL: %d",g_scan.sql_level); break;
         case 2: snprintf(buf,n,"Time Hold: %.1f sec",(double)g_scan.time_hold_ms/1000.0); break;
-        case 3: snprintf(buf,n,"Scope On Hit: %s",g_scan.scope_on_hit?"ON":"OFF"); break;
-        case 4: snprintf(buf,n,"Clear Temp Avoids"); break;
+        case 3: snprintf(buf,n,"Clear Temp Avoids"); break;
         default: snprintf(buf,n,"%s",scanner_is_scanning(&g_scan)?"HOLD":"START SCAN"); break;
         }
         break;
@@ -3454,9 +3580,10 @@ static void menu_item_text(MenuCategory cat,int item,char *buf,size_t n)
 
     case MENU_DISPLAY:
         switch(item){
-        case 0: snprintf(buf,n,"Scope: %s",g_scan.scope_visible?"ON":"OFF"); break;
-        case 1: snprintf(buf,n,"Scope On Hit: %s",g_scan.scope_on_hit?"ON":"OFF"); break;
-        case 2: snprintf(buf,n,"Scope Screen: %s",g_scan.scope_screen?"TOP":"BOTTOM"); break;
+        case 0:
+            snprintf(buf,n,"View: %s",g_scan.scope_visible?(g_waterfall_visible?"WATERFALL":"SCOPE"):"RADIO");
+            break;
+        case 1: snprintf(buf,n,"Scope Screen: %s",g_scan.scope_screen?"TOP":"BOTTOM"); break;
         default: {
             static const char *ov[]={"OFF","MINIMAL","FULL"};
             snprintf(buf,n,"Scope Overlay: %s",ov[g_scan.scope_overlay]);
@@ -3555,9 +3682,8 @@ static void menu_action(Radio *r)
             else if(g_scan.time_hold_ms==5000)g_scan.time_hold_ms=10000;
             else g_scan.time_hold_ms=2000;
             break;
-        case 3: g_scan.scope_on_hit=!g_scan.scope_on_hit; break;
-        case 4: clear_temp_avoids(); break;
-        case 5:
+        case 3: clear_temp_avoids(); break;
+        case 4:
             if(scanner_is_scanning(&g_scan))scanner_stop(&g_scan);
             else if(!g_scan.vfo_mode)scanner_start(&g_scan,r);
             break;
@@ -3593,9 +3719,18 @@ static void menu_action(Radio *r)
 
     case MENU_DISPLAY:
         switch(g_menu_item){
-        case 0: g_scan.scope_visible=!g_scan.scope_visible; g_waterfall_visible=false; break;
-        case 1: g_scan.scope_on_hit=!g_scan.scope_on_hit; break;
-        case 2: g_scan.scope_screen=g_scan.scope_screen?0:1; break;
+        case 0:
+            if(!g_scan.scope_visible){
+                g_scan.scope_visible=true;
+                g_waterfall_visible=false;
+            }else if(!g_waterfall_visible){
+                g_waterfall_visible=true;
+            }else{
+                g_scan.scope_visible=false;
+                g_waterfall_visible=false;
+            }
+            break;
+        case 1: g_scan.scope_screen=g_scan.scope_screen?0:1; break;
         default: g_scan.scope_overlay=(g_scan.scope_overlay+1)%3; break;
         }
         scanner_save(&g_scan);
@@ -3853,16 +3988,20 @@ int main(int argc, char **argv)
                     continue;
                 }
 
-                /* NFM scanner acquisition watches the newest post-retune IQ
-                 * directly, bypassing the playback jitter buffer.  This lets a
-                 * continuously keyed simplex/FRS signal stop the scanner before
-                 * the buffered DSP path has caught up. */
+                /* During NFM SCAN, carrier control follows the newest IQ
+                 * directly rather than the delayed playback FIFO.  Continue
+                 * feeding the live detector after acquisition so RECEIVE can
+                 * remain locked to an active carrier and CARRIER/DELAY resume
+                 * behavior reflects live RF rather than buffered history. */
                 if(r.mode==MODE_NFM && !g_scan.vfo_mode &&
                    scanner_is_scanning(&g_scan) &&
-                   (g_scan.state==SCANNER_SETTLE || g_scan.state==SCANNER_CHECK))
+                   (g_scan.state==SCANNER_SETTLE ||
+                    g_scan.state==SCANNER_CHECK ||
+                    g_scan.state==SCANNER_RECEIVE ||
+                    g_scan.state==SCANNER_DELAY))
                     scanner_scanfast_feed(iqbuf,(u32)n);
 
-                iq_fifo_write_bytes(iqbuf, (u32)n);
+                iq_fifo_write_bytes_mode(iqbuf, (u32)n, r.mode);
             } else if (n == 0) {
                 if(radio_reconnect(&r)) {
                     lastRecvBytes = r.recv_bytes;
@@ -4024,7 +4163,8 @@ int main(int argc, char **argv)
 
         // One compositor owns both framebuffers. Text/status uses a relaxed
         // 5 Hz cadence; scope uses the existing 25 Hz FFT cadence.
-        bool showScope=(g_scan.scope_visible || (g_scan.scope_on_hit && g_scan.squelch_open)) && g_scope_allowed;
+        bool scanIdle=scanner_is_scanning(&g_scan)&&!g_scan.squelch_open;
+        bool showScope=g_scan.scope_visible&&g_scope_allowed&&!scanIdle;
         u64 uiInterval=showScope?FFT_REFRESH_MS:TEXT_UI_REFRESH_MS;
         if(g_ui_dirty || nowMs-g_last_ui_render_ms>=uiInterval){
             u32 iqPctNow=(iqFifoCount*100U)/IQ_FIFO_BYTES;

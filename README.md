@@ -8,7 +8,7 @@ The RTL-SDR is the RF front end. The 3DS handles the scanner logic, FM demodulat
 >
 > Based on internal development build **v21.13d**.
 
-> **Source hotfix note:** the current source tree includes post-beta NFM latency and scan-acquisition fixes. The prebuilt `release/3ds-sdr.3dsx` remains the original v0.1.0-beta binary until a newly compiled/tested binary is published.
+> **Scanner hotfix:** the current source tree contains the hardware-tested scanner synchronization fixes. NFM scanning is deliberately conservative and may be slower than a dedicated scanner, prioritizing correct frequency association and reliable holds.
 
 ## Screenshots
 
@@ -69,6 +69,7 @@ The default `rtl_tcp` port is **1234**. On startup the 3DS presents a server-IP 
 - WBFM broadcast receive
 - 256-bin spectrum scope
 - Full-screen rolling waterfall using the same FFT/smoothing data as the scope
+- Persistent RADIO / SCOPE / WATERFALL view selection; idle scanning keeps radio status visible and the selected visualization appears on RECEIVE or HOLD
 - Squelch with global and per-channel settings
 - DELAY, CARRIER, and TIME scanner resume modes
 - Explicit SCAN / HOLD / HOLD RX operating states
@@ -110,15 +111,17 @@ The 3DS sends the sample-rate, frequency, and tuner commands after connecting.
 
 ## Download / install
 
-A prebuilt **v0.1.0-beta** binary is included in this repository:
+A tested **v0.1.0-beta scanner-hotfix** binary is included in this repository:
 
 [`release/3ds-sdr.3dsx`](release/3ds-sdr.3dsx)
 
 SHA-256:
 
 ```text
-9c21ed3be9dda91ff29788d2940a69d9802be679d92baec6f108bb0e5c93b5a0
+db3148f1166a4c0c3d9c4426096b06653eafa5fde4eea9120a0cd7640399b130
 ```
+
+This build includes the post-beta NFM scanner synchronization fixes described in the changelog. The scanner intentionally uses a conservative 250 ms NFM retune quarantine, so scanning is slower but avoids assigning delayed IQ from the previous frequency to the newly displayed memory.
 
 Copy `3ds-sdr.3dsx` to your SD card, for example:
 
