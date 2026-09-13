@@ -276,15 +276,27 @@ static const u32 g_step_hz[] = {
 };
 #define STEP_COUNT ((int)(sizeof(g_step_hz)/sizeof(g_step_hz[0])))
 
-typedef enum { MENU_CHANNEL=0, MENU_BANKS, MENU_SCAN, MENU_RADIO, MENU_DISPLAY, MENU_SYSTEM, MENU_CAT_COUNT } MenuCategory;
-static int menu_item_count(MenuCategory c);
-static const char *menu_cat_name(MenuCategory c);
-static void menu_item_text(MenuCategory cat,int item,char *buf,size_t n);
+/* Hierarchical firmware menu.  Y opens a small home menu, then drills into
+ * memory/bank browsers or focused settings pages. */
+typedef enum {
+    MENU_VIEW_HOME = 0,
+    MENU_VIEW_MEMORIES,
+    MENU_VIEW_MEMORY,
+    MENU_VIEW_BANKS,
+    MENU_VIEW_BANK,
+    MENU_VIEW_SCAN,
+    MENU_VIEW_VFO,
+    MENU_VIEW_DISPLAY,
+    MENU_VIEW_SYSTEM
+} MenuView;
+static int menu_view_item_count(MenuView v);
+static const char *menu_view_title(MenuView v);
+static void menu_item_text_new(MenuView view,int item,char *buf,size_t n);
 static void radio_retune_reset(Radio *r);
 static void tune_frequency(Radio *r,u32 freq,RadioMode mode);
 static bool radio_reconnect(Radio *r);
 static bool g_menu_open = false;
-static MenuCategory g_menu_cat = MENU_CHANNEL;
+static MenuView g_menu_view = MENU_VIEW_HOME;
 static int g_menu_item = 0;
 static bool g_show_debug = false;
 static bool g_input_lock_until_release = false;
@@ -2457,21 +2469,112 @@ static void ui_control_status(UiSurface *s,const Radio *r)
     }
 }
 
+static void ui_menu_row(UiSurface *s,int row,int selected,const char *text,int scale)
+{
+    int y=45+row*17;
+    if(selected) ui_rect(s,4,y-3,s->w-8,16,C_SELECT);
+    ui_text(s,9,y,text,scale,selected?C_TEXT:C_DIM);
+}
+
 static void ui_menu(UiSurface *s,const Radio *r)
 {
     ui_clear(s,C_BG);
-    char f[32]; snprintf(f,sizeof(f),"%03lu.%06lu MHz",(unsigned long)(r->freq_hz/1000000U),(unsigned long)(r->freq_hz%1000000U));
-    ui_center(s,4,f,2,C_ACCENT);
-    char cat[48]; snprintf(cat,sizeof(cat),"< %s >",menu_cat_name(g_menu_cat)); ui_center(s,25,cat,2,C_WARN);
-    int n=menu_item_count(g_menu_cat), first=0; if(g_menu_item>7)first=g_menu_item-7;
-    char buf[64];
-    for(int row=0;row<8&&first+row<n;row++){
-        int item=first+row,y=53+row*20; menu_item_text(g_menu_cat,item,buf,sizeof(buf));
-        if(item==g_menu_item)ui_rect(s,5,y-3,s->w-10,18,C_SELECT);
-        ui_text(s,10,y,buf,2,item==g_menu_item?C_TEXT:C_DIM);
+    (void)r;
+
+    char title[64];
+    snprintf(title,sizeof(title),"%s",menu_view_title(g_menu_view));
+    ui_center(s,5,title,2,C_WARN);
+    ui_line(s,6,27,s->w-6,27,C_PANEL);
+
+    if(g_menu_view==MENU_VIEW_HOME){
+        static const char *items[]={"Memories","Banks","Scan Settings","VFO","Display","System"};
+        for(int i=0;i<6;i++) ui_menu_row(s,i,i==g_menu_item,items[i],2);
+        ui_text(s,8,218,"UP/DOWN SELECT",1,C_DIM);
+        ui_text(s,8,230,"A OPEN   B/Y CLOSE",1,C_DIM);
+        return;
     }
-    ui_text(s,8,218,"LEFT/RIGHT TAB  UP/DOWN ITEM",1,C_DIM);
-    ui_text(s,8,230,"A SELECT   B/Y CLOSE",1,C_DIM);
+
+    if(g_menu_view==MENU_VIEW_MEMORIES){
+        ScanBank *b=edit_bank();
+        char h[64];
+        snprintf(h,sizeof(h),"< BANK %d/%d  %s >",g_edit_bank_index+1,g_scan.bank_count,b?b->name:"--");
+        ui_center(s,29,h,1,C_ACCENT);
+        int count=b?b->channel_count:0;
+        int total=count+1; /* final virtual row is Add Memory */
+        int first=0;
+        if(g_menu_item>9) first=g_menu_item-9;
+        for(int row=0;row<10 && first+row<total;row++){
+            int item=first+row;
+            char buf[64];
+            if(item<count){
+                ScanChannel *c=&b->channels[item];
+                snprintf(buf,sizeof(buf),"%c%02d %03lu.%03lu %-4s %s",
+                         c->enabled?' ':'-',item+1,
+                         (unsigned long)(c->freq_hz/1000000U),
+                         (unsigned long)((c->freq_hz%1000000U)/1000U),
+                         mode_name(c->mode),c->name);
+            }else snprintf(buf,sizeof(buf),"+ ADD MEMORY");
+            ui_menu_row(s,row,item==g_menu_item,buf,1);
+        }
+        ui_text(s,8,218,"LEFT/RIGHT BANK  UP/DOWN MEMORY",1,C_DIM);
+        ui_text(s,8,230,"A OPTIONS  X LISTEN  R AVOID",1,C_DIM);
+        return;
+    }
+
+    if(g_menu_view==MENU_VIEW_MEMORY){
+        ScanBank *b=edit_bank(); ScanChannel *c=edit_channel();
+        if(b&&c){
+            ui_textf(s,8,30,1,C_ACCENT,"%s / %s",b->name,c->name);
+            ui_textf(s,8,41,1,C_DIM,"%03lu.%06lu MHz  %s  HITS %lu",
+                     (unsigned long)(c->freq_hz/1000000U),(unsigned long)(c->freq_hz%1000000U),
+                     mode_name(c->mode),(unsigned long)c->hit_count);
+        }
+        int n=menu_view_item_count(g_menu_view),first=0;
+        if(g_menu_item>8) first=g_menu_item-8;
+        char buf[64];
+        for(int row=0;row<9&&first+row<n;row++){
+            int item=first+row; menu_item_text_new(g_menu_view,item,buf,sizeof(buf));
+            ui_menu_row(s,row+1,item==g_menu_item,buf,1);
+        }
+        ui_text(s,8,218,"UP/DOWN ITEM  A SELECT",1,C_DIM);
+        ui_text(s,8,230,"B BACK   Y CLOSE",1,C_DIM);
+        return;
+    }
+
+    if(g_menu_view==MENU_VIEW_BANKS){
+        int total=g_scan.bank_count+1;
+        int first=0; if(g_menu_item>9) first=g_menu_item-9;
+        for(int row=0;row<10&&first+row<total;row++){
+            int item=first+row; char buf[64];
+            if(item<g_scan.bank_count){
+                ScanBank *b=&g_scan.banks[item];
+                snprintf(buf,sizeof(buf),"[%c] %02d %-20s %2d",
+                         b->enabled?'X':' ',item+1,b->name,b->channel_count);
+            }else snprintf(buf,sizeof(buf),"+ ADD BANK");
+            ui_menu_row(s,row,item==g_menu_item,buf,1);
+        }
+        ui_text(s,8,218,"UP/DOWN BANK",1,C_DIM);
+        ui_text(s,8,230,"A OPTIONS  X ENABLE  B BACK",1,C_DIM);
+        return;
+    }
+
+    if(g_menu_view==MENU_VIEW_BANK){
+        ScanBank *b=edit_bank();
+        if(b) ui_textf(s,8,31,1,C_ACCENT,"%s   %d MEMORIES   %s",b->name,b->channel_count,b->enabled?"ENABLED":"DISABLED");
+    }
+
+    /* Focused setting/detail pages share a compact list renderer. */
+    int n=menu_view_item_count(g_menu_view),first=0;
+    if(g_menu_item>9) first=g_menu_item-9;
+    char buf[64];
+    int rowBias=(g_menu_view==MENU_VIEW_BANK)?1:0;
+    for(int row=0;row<10&&first+row<n;row++){
+        int item=first+row;
+        menu_item_text_new(g_menu_view,item,buf,sizeof(buf));
+        ui_menu_row(s,row+rowBias,item==g_menu_item,buf,1);
+    }
+    ui_text(s,8,218,"UP/DOWN ITEM  A SELECT",1,C_DIM);
+    ui_text(s,8,230,"B BACK   Y CLOSE",1,C_DIM);
 }
 
 static void ui_scope(UiSurface *s,const Radio *r)
@@ -2620,7 +2723,7 @@ static void ui_debug(UiSurface *top,UiSurface *bottom,const Radio *r)
                  scanner_bank_eligible_count(&g_scan,g_scan.bank_index),
                  db?db->channel_count:0);
     }
-    ui_text(top,8,226,"SELECT RADIO   START EXIT",1,C_DIM);
+    ui_text(top,8,226,"B RADIO   START EXIT",1,C_DIM);
 
     ui_text(bottom,8,8,"CURRENT",2,C_WARN); ui_frequency(bottom,r,30);
     ScanBank *b=scanner_bank(&g_scan); ScanChannel *c=scanner_channel(&g_scan);
@@ -3280,6 +3383,9 @@ static void tune_frequency(Radio *r, u32 freq, RadioMode mode)
 
 static void enter_vfo(Radio *r)
 {
+    /* Keep the proven dev11 live-receiver transition byte-for-byte in
+     * behavior. The hierarchical menu is not allowed to reinterpret VFO
+     * state or add extra scanner/retune side effects. */
     g_scan.vfo_mode=true; g_scan.scanning=false; g_scan.state=SCANNER_STOPPED;
     tune_frequency(r,g_scan.vfo_freq_hz,g_scan.vfo_radio_mode);
 }
@@ -3390,9 +3496,7 @@ static void add_channel(Radio *r,bool from_vfo)
     for(int i=0;i<b->channel_count;i++){
         if(channel_exact_duplicate(&draft,&b->channels[i])){
             g_edit_channel_index=i;
-            if(g_menu_cat==MENU_CHANNEL) g_menu_item=1;
-            else if(g_menu_cat==MENU_BANKS) g_menu_item=0;
-            else if(g_menu_cat==MENU_RADIO) g_menu_item=0;
+            g_menu_item=i;
             scanner_ui_dirty();
             return;
         }
@@ -3405,9 +3509,7 @@ static void add_channel(Radio *r,bool from_vfo)
     /* Do not leave the menu cursor sitting on an Add/Save action.  Together
      * with the post-keyboard release lock this makes a repeated add require a
      * deliberate navigation back to the action. */
-    if(g_menu_cat==MENU_CHANNEL) g_menu_item=1;
-    else if(g_menu_cat==MENU_BANKS) g_menu_item=0;
-    else if(g_menu_cat==MENU_RADIO) g_menu_item=0;
+    g_menu_item=g_edit_channel_index;
 
     scanner_save(&g_scan);
 
@@ -3501,104 +3603,177 @@ static int remove_duplicate_channels_current_bank(void)
     return removed;
 }
 
-static int menu_item_count(MenuCategory c)
+static int menu_view_item_count(MenuView v)
 {
-    static const int n[]={12,6,5,6,3,5};
-    return n[(int)c];
+    switch(v){
+        case MENU_VIEW_HOME: return 6;
+        case MENU_VIEW_MEMORY: return 11;
+        case MENU_VIEW_BANK: return 6;
+        case MENU_VIEW_SCAN: return 5;
+        case MENU_VIEW_VFO: return 6;
+        case MENU_VIEW_DISPLAY: return 3;
+        case MENU_VIEW_SYSTEM: return 5;
+        default: return 0;
+    }
 }
 
-static const char *menu_cat_name(MenuCategory c)
+static const char *menu_view_title(MenuView v)
 {
-    static const char *n[]={"CHANNEL","BANKS","SCAN","RADIO","DISPLAY","SYSTEM"};
-    return n[(int)c];
+    switch(v){
+        case MENU_VIEW_HOME: return "MENU";
+        case MENU_VIEW_MEMORIES: return "MEMORIES";
+        case MENU_VIEW_MEMORY: return "MEMORY OPTIONS";
+        case MENU_VIEW_BANKS: return "BANKS";
+        case MENU_VIEW_BANK: return "BANK OPTIONS";
+        case MENU_VIEW_SCAN: return "SCAN SETTINGS";
+        case MENU_VIEW_VFO: return "VFO";
+        case MENU_VIEW_DISPLAY: return "DISPLAY";
+        case MENU_VIEW_SYSTEM: return "SYSTEM";
+        default: return "MENU";
+    }
 }
 
-static void menu_item_text(MenuCategory cat,int item,char *buf,size_t n)
+static void menu_item_text_new(MenuView view,int item,char *buf,size_t n)
 {
     ScanBank *b=edit_bank();
     ScanChannel *c=edit_channel();
-
-    switch(cat){
-    case MENU_CHANNEL:
+    switch(view){
+    case MENU_VIEW_MEMORY:
         switch(item){
-        case 0:
-            snprintf(buf,n,"Edit Bank: %d/%d %s",
-                     g_edit_bank_index+1,g_scan.bank_count,b?b->name:"--");
-            break;
-        case 1:
-            snprintf(buf,n,"Edit Ch: %d/%d %s",
-                     c?g_edit_channel_index+1:0,b?b->channel_count:0,
-                     c?c->name:"--");
-            break;
-        case 2: snprintf(buf,n,"Edit Name"); break;
-        case 3: snprintf(buf,n,"Edit Frequency"); break;
-        case 4: snprintf(buf,n,"Mode: %s",c?mode_name(c->mode):"--"); break;
-        case 5: snprintf(buf,n,"Scan Enabled: %s",c&&c->enabled?"ON":"OFF"); break;
-        case 6: snprintf(buf,n,"Priority: %s",c&&c->priority?"ON":"OFF"); break;
-        case 7: snprintf(buf,n,"Delay: %.1f sec",c?(double)c->delay_ms/1000.0:0.0); break;
-        case 8:
-            if(c&&c->squelch_override>=0) snprintf(buf,n,"Squelch: %d",c->squelch_override);
-            else snprintf(buf,n,"Squelch: GLOBAL");
-            break;
-        case 9: snprintf(buf,n,"Step: %.3f kHz",c?(double)g_step_hz[c->step_index]/1000.0:0.0); break;
-        case 10: snprintf(buf,n,"Add Channel"); break;
-        default: snprintf(buf,n,"Delete Channel"); break;
+            case 0: snprintf(buf,n,"LISTEN / HOLD HERE"); break;
+            case 1: snprintf(buf,n,"Edit Name"); break;
+            case 2: snprintf(buf,n,"Edit Frequency"); break;
+            case 3: snprintf(buf,n,"Mode: %s",c?mode_name(c->mode):"--"); break;
+            case 4: snprintf(buf,n,"Scan Enabled: %s",c&&c->enabled?"ON":"OFF"); break;
+            case 5: snprintf(buf,n,"Temporary Avoid: %s",c&&c->temp_avoid?"ON":"OFF"); break;
+            case 6:
+                if(c&&c->squelch_override>=0) snprintf(buf,n,"Squelch: %d",c->squelch_override);
+                else snprintf(buf,n,"Squelch: GLOBAL");
+                break;
+            case 7: snprintf(buf,n,"Delay: %.1f sec",c?(double)c->delay_ms/1000.0:0.0); break;
+            case 8: snprintf(buf,n,"Priority: %s",c&&c->priority?"ON":"OFF"); break;
+            case 9: snprintf(buf,n,"Step: %.3f kHz",c?(double)g_step_hz[c->step_index]/1000.0:0.0); break;
+            default: snprintf(buf,n,"Delete Memory"); break;
         }
         break;
-
-    case MENU_BANKS:
+    case MENU_VIEW_BANK:
         switch(item){
-        case 0: snprintf(buf,n,"Edit Bank: %d/%d %s",g_edit_bank_index+1,g_scan.bank_count,b?b->name:"--"); break;
-        case 1: snprintf(buf,n,"Rename Bank"); break;
-        case 2: snprintf(buf,n,"Bank Enabled: %s",b&&b->enabled?"ON":"OFF"); break;
-        case 3: snprintf(buf,n,"Add Bank"); break;
-        case 4: snprintf(buf,n,"Delete Bank"); break;
-        default: snprintf(buf,n,"Add Channel"); break;
+            case 0: snprintf(buf,n,"Open Memories"); break;
+            case 1: snprintf(buf,n,"Rename Bank"); break;
+            case 2: snprintf(buf,n,"Bank Enabled: %s",b&&b->enabled?"ON":"OFF"); break;
+            case 3: snprintf(buf,n,"Add Memory"); break;
+            case 4: snprintf(buf,n,"Remove Duplicate Frequencies"); break;
+            default: snprintf(buf,n,"Delete Bank"); break;
         }
         break;
-
-    case MENU_SCAN:
+    case MENU_VIEW_SCAN:
         switch(item){
-        case 0: snprintf(buf,n,"Resume: %s",scan_resume_name(g_scan.resume_mode)); break;
-        case 1: snprintf(buf,n,"Global SQL: %d",g_scan.sql_level); break;
-        case 2: snprintf(buf,n,"Time Hold: %.1f sec",(double)g_scan.time_hold_ms/1000.0); break;
-        case 3: snprintf(buf,n,"Clear Temp Avoids"); break;
-        default: snprintf(buf,n,"%s",scanner_is_scanning(&g_scan)?"HOLD":"START SCAN"); break;
+            case 0: snprintf(buf,n,"Resume: %s",scan_resume_name(g_scan.resume_mode)); break;
+            case 1: snprintf(buf,n,"Global SQL: %d",g_scan.sql_level); break;
+            case 2: snprintf(buf,n,"Time Hold: %.1f sec",(double)g_scan.time_hold_ms/1000.0); break;
+            case 3: snprintf(buf,n,"Clear Temporary Avoids"); break;
+            default: snprintf(buf,n,"%s",scanner_is_scanning(&g_scan)?"HOLD SCANNER":"START SCANNER"); break;
         }
         break;
-
-    case MENU_RADIO:
+    case MENU_VIEW_VFO:
         switch(item){
-        case 0: snprintf(buf,n,"Mode: %s",g_scan.vfo_mode?"VFO":"CHANNEL"); break;
-        case 1: snprintf(buf,n,"Edit VFO Frequency"); break;
-        case 2: snprintf(buf,n,"VFO Mode: %s",mode_name(g_scan.vfo_radio_mode)); break;
-        case 3: snprintf(buf,n,"VFO Step: %.3f kHz",(double)g_step_hz[g_scan.vfo_step_index]/1000.0); break;
-        case 4: snprintf(buf,n,"Save VFO To Edit Bank"); break;
-        default: snprintf(buf,n,"Hold Audio: %s",g_scan.hold_audio_monitor?"MONITOR":"SQUELCHED"); break;
+            case 0: snprintf(buf,n,"Radio Mode: %s",g_scan.vfo_mode?"VFO":"MEMORY"); break;
+            case 1: snprintf(buf,n,"Edit VFO Frequency"); break;
+            case 2: snprintf(buf,n,"Demod: %s",mode_name(g_scan.vfo_radio_mode)); break;
+            case 3: snprintf(buf,n,"Step: %.3f kHz",(double)g_step_hz[g_scan.vfo_step_index]/1000.0); break;
+            case 4: snprintf(buf,n,"Save VFO To Selected Bank"); break;
+            default: snprintf(buf,n,"Hold Audio: %s",g_scan.hold_audio_monitor?"MONITOR":"SQUELCHED"); break;
         }
         break;
-
-    case MENU_DISPLAY:
+    case MENU_VIEW_DISPLAY:
         switch(item){
-        case 0:
-            snprintf(buf,n,"View: %s",g_scan.scope_visible?(g_waterfall_visible?"WATERFALL":"SCOPE"):"RADIO");
-            break;
-        case 1: snprintf(buf,n,"Scope Screen: %s",g_scan.scope_screen?"TOP":"BOTTOM"); break;
-        default: {
-            static const char *ov[]={"OFF","MINIMAL","FULL"};
-            snprintf(buf,n,"Scope Overlay: %s",ov[g_scan.scope_overlay]);
-            break;
-        }}
+            case 0: snprintf(buf,n,"View: %s",g_scan.scope_visible?(g_waterfall_visible?"WATERFALL":"SCOPE"):"RADIO"); break;
+            case 1: snprintf(buf,n,"Scope Screen: %s",g_scan.scope_screen?"TOP":"BOTTOM"); break;
+            default: {
+                static const char *ov[]={"OFF","MINIMAL","FULL"};
+                snprintf(buf,n,"Scope Overlay: %s",ov[g_scan.scope_overlay]); break;
+            }
+        }
         break;
-
-    default:
+    case MENU_VIEW_SYSTEM:
         if(item==0) snprintf(buf,n,"Save Settings");
         else if(item==1) snprintf(buf,n,"Reset Hit Counters");
-        else if(item==2) snprintf(buf,n,"Remove Dups Current Bank");
+        else if(item==2) snprintf(buf,n,"Remove Dups Selected Bank");
         else if(item==3) snprintf(buf,n,"Remove Dups All Banks");
         else snprintf(buf,n,"Diagnostics");
         break;
+    default: snprintf(buf,n,"--"); break;
     }
+}
+
+static void menu_sync_memory_cursor(void)
+{
+    ScanBank *b=edit_bank();
+    int count=b?b->channel_count:0;
+    if(g_menu_item<0) g_menu_item=0;
+    if(g_menu_item>count) g_menu_item=count;
+    if(count>0 && g_menu_item<count) g_edit_channel_index=g_menu_item;
+    else if(count<=0) g_edit_channel_index=0;
+}
+
+/* Live receiver control is deliberately separated from menu browsing.
+ * Merely moving the menu/edit cursor must never stop scanning, retune RF,
+ * alter squelch state, or touch the transport.  Only this explicit LISTEN
+ * action promotes the selected edit memory into the live receiver. */
+static void receiver_hold_selected_memory(Radio *r)
+{
+    ScanBank *b=edit_bank();
+    ScanChannel *c=edit_channel();
+    if(!b || !c) return;
+
+    /* The menu may choose WHICH existing memory is live, but it must not
+     * invent a new RF-control path. Enter dev11 HOLD, copy the selected
+     * indices, and call the same dev11 scanner_tune_current() used by normal
+     * memory navigation. scanner_stop() itself emits no rtl_tcp command. */
+    scanner_stop(&g_scan);
+    g_scan.vfo_mode=false;
+    g_scan.bank_index=g_edit_bank_index;
+    g_scan.channel_index=g_edit_channel_index;
+    scanner_tune_current(&g_scan,r);
+}
+
+static void menu_tune_selected_memory(Radio *r)
+{
+    receiver_hold_selected_memory(r);
+    g_menu_open=false;
+    g_menu_view=MENU_VIEW_HOME;
+    g_menu_item=0;
+    scanner_ui_dirty();
+}
+
+static void menu_enter_view(MenuView v)
+{
+    g_menu_view=v;
+    g_menu_item=0;
+    if(v==MENU_VIEW_MEMORIES){
+        ScanBank *b=edit_bank();
+        if(b&&b->channel_count>0){
+            if(g_edit_channel_index>=b->channel_count) g_edit_channel_index=b->channel_count-1;
+            if(g_edit_channel_index<0) g_edit_channel_index=0;
+            g_menu_item=g_edit_channel_index;
+        }
+    }else if(v==MENU_VIEW_BANKS){
+        g_menu_item=g_edit_bank_index;
+    }
+    scanner_ui_dirty();
+}
+
+static void menu_back(void)
+{
+    switch(g_menu_view){
+        case MENU_VIEW_HOME: g_menu_open=false; break;
+        case MENU_VIEW_MEMORY: menu_enter_view(MENU_VIEW_MEMORIES); break;
+        case MENU_VIEW_MEMORIES: menu_enter_view(MENU_VIEW_HOME); break;
+        case MENU_VIEW_BANK: menu_enter_view(MENU_VIEW_BANKS); break;
+        case MENU_VIEW_BANKS: menu_enter_view(MENU_VIEW_HOME); break;
+        default: menu_enter_view(MENU_VIEW_HOME); break;
+    }
+    scanner_ui_dirty();
 }
 
 static void menu_action(Radio *r)
@@ -3606,154 +3781,155 @@ static void menu_action(Radio *r)
     ScanBank *b=edit_bank();
     ScanChannel *c=edit_channel();
 
-    switch(g_menu_cat){
-    case MENU_CHANNEL:
-        switch(g_menu_item){
-        case 0:
-            edit_cycle_bank(+1);
-            break;
-        case 1:
-            edit_cycle_channel(+1);
-            break;
-        case 2:
-            if(c) scanner_keyboard_edit(r,c->name,sizeof(c->name),"Channel name");
-            break;
-        case 3:
-            if(c) frequency_editor_begin("EDIT MEMORY FREQUENCY",&c->freq_hz,false);
-            break;
-        case 4:
-            if(c) c->mode=(c->mode==MODE_NFM)?MODE_WBFM:MODE_NFM;
-            break;
-        case 5:
-            if(c) c->enabled=!c->enabled;
-            break;
-        case 6:
-            if(c) c->priority=!c->priority;
-            break;
-        case 7:
-            if(c){
-                static const u32 d[]={0,1000,2000,3000,5000};
-                int k=0;
-                while(k<5&&d[k]!=c->delay_ms)k++;
-                c->delay_ms=d[(k+1)%5];
-            }
-            break;
-        case 8:
-            if(c){
-                if(c->squelch_override<0)c->squelch_override=20;
-                else if(c->squelch_override>=100)c->squelch_override=-1;
-                else c->squelch_override+=10;
-            }
-            break;
-        case 9:
-            if(c)c->step_index=(c->step_index+1)%STEP_COUNT;
-            break;
-        case 10:
+    if(g_menu_view==MENU_VIEW_HOME){
+        static const MenuView target[]={MENU_VIEW_MEMORIES,MENU_VIEW_BANKS,MENU_VIEW_SCAN,MENU_VIEW_VFO,MENU_VIEW_DISPLAY,MENU_VIEW_SYSTEM};
+        if(g_menu_item>=0&&g_menu_item<6) menu_enter_view(target[g_menu_item]);
+        return;
+    }
+
+    if(g_menu_view==MENU_VIEW_MEMORIES){
+        int count=b?b->channel_count:0;
+        if(g_menu_item>=count){
             add_channel(r,false);
-            break;
-        case 11:
-            delete_edit_channel();
-            break;
+            b=edit_bank();
+            if(b&&b->channel_count>0) g_menu_item=g_edit_channel_index;
+        }else{
+            g_edit_channel_index=g_menu_item;
+            menu_enter_view(MENU_VIEW_MEMORY);
         }
-        scanner_save(&g_scan);
-        break;
+        scanner_ui_dirty();
+        return;
+    }
 
-    case MENU_BANKS:
+    if(g_menu_view==MENU_VIEW_MEMORY){
         switch(g_menu_item){
-        case 0: edit_cycle_bank(+1); break;
-        case 1: if(b)scanner_keyboard_edit(r,b->name,sizeof(b->name),"Bank name"); break;
-        case 2: if(b)b->enabled=!b->enabled; break;
-        case 3: add_bank(r); break;
-        case 4: delete_edit_bank(); break;
-        case 5: add_channel(r,false); break;
+            case 0: menu_tune_selected_memory(r); return;
+            case 1: if(c) scanner_keyboard_edit(r,c->name,sizeof(c->name),"Memory name"); break;
+            case 2: if(c) frequency_editor_begin("EDIT MEMORY FREQUENCY",&c->freq_hz,false); break;
+            case 3: if(c) c->mode=(c->mode==MODE_NFM)?MODE_WBFM:MODE_NFM; break;
+            case 4: if(c) c->enabled=!c->enabled; break;
+            case 5: if(c) c->temp_avoid=!c->temp_avoid; break;
+            case 6:
+                if(c){ if(c->squelch_override<0)c->squelch_override=20; else if(c->squelch_override>=100)c->squelch_override=-1; else c->squelch_override+=10; }
+                break;
+            case 7:
+                if(c){ static const u32 d[]={0,1000,2000,3000,5000}; int k=0; while(k<5&&d[k]!=c->delay_ms)k++; c->delay_ms=d[(k+1)%5]; }
+                break;
+            case 8: if(c) c->priority=!c->priority; break;
+            case 9: if(c)c->step_index=(c->step_index+1)%STEP_COUNT; break;
+            case 10:
+                delete_edit_channel();
+                menu_enter_view(MENU_VIEW_MEMORIES);
+                b=edit_bank(); if(b&&b->channel_count>0) g_menu_item=g_edit_channel_index; else g_menu_item=0;
+                return;
         }
-        scanner_save(&g_scan);
-        break;
+        scanner_save(&g_scan); scanner_ui_dirty(); return;
+    }
 
-    case MENU_SCAN:
+    if(g_menu_view==MENU_VIEW_BANKS){
+        if(g_menu_item>=g_scan.bank_count){
+            add_bank(r);
+            g_menu_item=g_edit_bank_index;
+        }else{
+            g_edit_bank_index=g_menu_item;
+            g_edit_channel_index=0;
+            menu_enter_view(MENU_VIEW_BANK);
+        }
+        scanner_ui_dirty(); return;
+    }
+
+    if(g_menu_view==MENU_VIEW_BANK){
         switch(g_menu_item){
-        case 0: scanner_cycle_resume(&g_scan); break;
-        case 1:
-            scanner_adjust_sql(&g_scan,5);
-            if(g_scan.sql_level>=100)g_scan.sql_level=0;
-            break;
-        case 2:
-            if(g_scan.time_hold_ms==2000)g_scan.time_hold_ms=5000;
-            else if(g_scan.time_hold_ms==5000)g_scan.time_hold_ms=10000;
-            else g_scan.time_hold_ms=2000;
-            break;
-        case 3: clear_temp_avoids(); break;
-        case 4:
-            if(scanner_is_scanning(&g_scan))scanner_stop(&g_scan);
-            else if(!g_scan.vfo_mode)scanner_start(&g_scan,r);
-            break;
+            case 0: menu_enter_view(MENU_VIEW_MEMORIES); return;
+            case 1: if(b)scanner_keyboard_edit(r,b->name,sizeof(b->name),"Bank name"); break;
+            case 2: if(b)b->enabled=!b->enabled; break;
+            case 3: add_channel(r,false); g_menu_item=3; break;
+            case 4: remove_duplicate_channels_current_bank(); break;
+            case 5: delete_edit_bank(); menu_enter_view(MENU_VIEW_BANKS); g_menu_item=g_edit_bank_index; return;
         }
-        scanner_save(&g_scan);
-        break;
+        scanner_save(&g_scan); scanner_ui_dirty(); return;
+    }
 
-    case MENU_RADIO:
+    if(g_menu_view==MENU_VIEW_SCAN){
         switch(g_menu_item){
-        case 0:
-            if(g_scan.vfo_mode)leave_vfo(r);
-            else enter_vfo(r);
-            break;
-        case 1:
-            frequency_editor_begin("EDIT VFO FREQUENCY",&g_scan.vfo_freq_hz,true);
-            break;
-        case 2:
-            g_scan.vfo_radio_mode=(g_scan.vfo_radio_mode==MODE_NFM)?MODE_WBFM:MODE_NFM;
-            if(g_scan.vfo_mode)tune_frequency(r,g_scan.vfo_freq_hz,g_scan.vfo_radio_mode);
-            break;
-        case 3:
-            g_scan.vfo_step_index=(g_scan.vfo_step_index+1)%STEP_COUNT;
-            break;
-        case 4:
-            if(g_scan.vfo_mode) add_channel(r,true);
-            break;
-        case 5:
-            g_scan.hold_audio_monitor=!g_scan.hold_audio_monitor;
-            break;
+            case 0: scanner_cycle_resume(&g_scan); break;
+            case 1: scanner_adjust_sql(&g_scan,5); if(g_scan.sql_level>=100)g_scan.sql_level=0; break;
+            case 2: if(g_scan.time_hold_ms==2000)g_scan.time_hold_ms=5000; else if(g_scan.time_hold_ms==5000)g_scan.time_hold_ms=10000; else g_scan.time_hold_ms=2000; break;
+            case 3: clear_temp_avoids(); break;
+            case 4: if(scanner_is_scanning(&g_scan))scanner_stop(&g_scan); else if(!g_scan.vfo_mode)scanner_start(&g_scan,r); break;
         }
-        scanner_save(&g_scan);
-        break;
+        scanner_save(&g_scan); scanner_ui_dirty(); return;
+    }
 
-    case MENU_DISPLAY:
+    if(g_menu_view==MENU_VIEW_VFO){
         switch(g_menu_item){
-        case 0:
-            if(!g_scan.scope_visible){
-                g_scan.scope_visible=true;
-                g_waterfall_visible=false;
-            }else if(!g_waterfall_visible){
-                g_waterfall_visible=true;
-            }else{
-                g_scan.scope_visible=false;
-                g_waterfall_visible=false;
-            }
-            break;
-        case 1: g_scan.scope_screen=g_scan.scope_screen?0:1; break;
-        default: g_scan.scope_overlay=(g_scan.scope_overlay+1)%3; break;
+            case 0: if(g_scan.vfo_mode)leave_vfo(r); else enter_vfo(r); break;
+            case 1: frequency_editor_begin("EDIT VFO FREQUENCY",&g_scan.vfo_freq_hz,true); break;
+            case 2: g_scan.vfo_radio_mode=(g_scan.vfo_radio_mode==MODE_NFM)?MODE_WBFM:MODE_NFM; if(g_scan.vfo_mode)tune_frequency(r,g_scan.vfo_freq_hz,g_scan.vfo_radio_mode); break;
+            case 3: g_scan.vfo_step_index=(g_scan.vfo_step_index+1)%STEP_COUNT; break;
+            case 4: if(g_scan.vfo_mode){ add_channel(r,true); g_menu_item=4; } break;
+            case 5: g_scan.hold_audio_monitor=!g_scan.hold_audio_monitor; break;
         }
-        scanner_save(&g_scan);
-        break;
+        scanner_save(&g_scan); scanner_ui_dirty(); return;
+    }
 
-    case MENU_SYSTEM:
+    if(g_menu_view==MENU_VIEW_DISPLAY){
+        switch(g_menu_item){
+            case 0:
+                if(!g_scan.scope_visible){ g_scan.scope_visible=true; g_waterfall_visible=false; }
+                else if(!g_waterfall_visible){ g_waterfall_visible=true; }
+                else { g_scan.scope_visible=false; g_waterfall_visible=false; }
+                break;
+            case 1: g_scan.scope_screen=g_scan.scope_screen?0:1; break;
+            case 2: g_scan.scope_overlay=(g_scan.scope_overlay+1)%3; break;
+        }
+        scanner_save(&g_scan); scanner_ui_dirty(); return;
+    }
+
+    if(g_menu_view==MENU_VIEW_SYSTEM){
         if(g_menu_item==0) scanner_save(&g_scan);
         else if(g_menu_item==1){
-            for(int bi=0;bi<g_scan.bank_count;bi++)
-                for(int ci=0;ci<g_scan.banks[bi].channel_count;ci++)
-                    g_scan.banks[bi].channels[ci].hit_count=0;
+            for(int bi=0;bi<g_scan.bank_count;bi++) for(int ci=0;ci<g_scan.banks[bi].channel_count;ci++) g_scan.banks[bi].channels[ci].hit_count=0;
             g_scan.hits=0;
-        }else if(g_menu_item==2){
-            remove_duplicate_channels_current_bank();
-        }else if(g_menu_item==3){
-            remove_duplicate_channels_all_banks();
-        }else g_show_debug=true;
-        break;
-
-    default:
-        break;
+        }else if(g_menu_item==2) remove_duplicate_channels_current_bank();
+        else if(g_menu_item==3) remove_duplicate_channels_all_banks();
+        else { g_show_debug=true; g_menu_open=false; }
+        scanner_save(&g_scan); scanner_ui_dirty(); return;
     }
-    scanner_ui_dirty();
+}
+
+static void menu_handle_input(u32 down,Radio *r)
+{
+    if(down&KEY_B){ menu_back(); return; }
+
+    if(g_menu_view==MENU_VIEW_MEMORIES){
+        if(down&KEY_DLEFT){ edit_cycle_bank(-1); g_menu_item=g_edit_channel_index; menu_sync_memory_cursor(); }
+        if(down&KEY_DRIGHT){ edit_cycle_bank(+1); g_menu_item=g_edit_channel_index; menu_sync_memory_cursor(); }
+        ScanBank *b=edit_bank(); int max=b?b->channel_count:0;
+        if((down&KEY_DUP) && g_menu_item>0) g_menu_item--;
+        if((down&KEY_DDOWN) && g_menu_item<max) g_menu_item++;
+        menu_sync_memory_cursor();
+        if(down&KEY_X){ if(g_menu_item<max) menu_tune_selected_memory(r); return; }
+        if(down&KEY_R){ if(g_menu_item<max){ ScanChannel *c=edit_channel(); if(c)c->temp_avoid=!c->temp_avoid; scanner_ui_dirty(); } }
+        if(down&KEY_A) menu_action(r);
+        return;
+    }
+
+    if(g_menu_view==MENU_VIEW_BANKS){
+        int max=g_scan.bank_count; /* plus virtual Add Bank row */
+        if((down&KEY_DUP)&&g_menu_item>0)g_menu_item--;
+        if((down&KEY_DDOWN)&&g_menu_item<max)g_menu_item++;
+        if(down&KEY_X){
+            if(g_menu_item<g_scan.bank_count){ g_edit_bank_index=g_menu_item; ScanBank *b=edit_bank(); if(b)b->enabled=!b->enabled; scanner_save(&g_scan); scanner_ui_dirty(); }
+        }
+        if(down&KEY_A)menu_action(r);
+        return;
+    }
+
+    int n=menu_view_item_count(g_menu_view);
+    if((down&KEY_DUP)&&g_menu_item>0)g_menu_item--;
+    if((down&KEY_DDOWN)&&g_menu_item<n-1)g_menu_item++;
+    if(down&KEY_A)menu_action(r);
 }
 
 int main(int argc, char **argv)
@@ -3872,24 +4048,30 @@ int main(int argc, char **argv)
 
         if (down & KEY_START) break;
 
-        if (down & KEY_SELECT) {
+        /* SELECT is intentionally unbound so system screenshot hotkeys can
+         * use it. Diagnostics live under SYSTEM; B returns from diagnostics
+         * without falling through to the normal PLAY/STOP binding. */
+        if (g_show_debug && (down & KEY_B)) {
+            g_show_debug = false;
             g_menu_open = false;
-            g_show_debug = !g_show_debug;
+            down &= ~KEY_B;
             scanner_ui_dirty();
         }
 
         g_scan.monitor = (held & KEY_L) != 0;
 
-        // Y opens/closes the radio-firmware menu. While open, D-pad/A belong
-        // exclusively to the menu rather than to bank/channel navigation.
-        if (!g_freq_edit_active && (down & KEY_Y)) {
+        // Y opens the hierarchical firmware menu at its home screen. While
+        // open, navigation belongs exclusively to the menu/browser.
+        if (!g_freq_edit_active && !g_show_debug && (down & KEY_Y)) {
             bool opening = !g_menu_open;
             g_menu_open = opening;
-            g_menu_item = 0;
-            g_ui_dirty = true;
             if(opening){
+                g_menu_view = MENU_VIEW_HOME;
+                g_menu_item = 0;
+                /* Snapshot only the edit cursor. Opening/browsing the menu is
+                 * observational and must not change SCAN/HOLD, live tuning,
+                 * audio gating, rtl_tcp transport, or receiver timing. */
                 edit_cursor_from_live();
-                if(scanner_is_scanning(&g_scan)) scanner_stop(&g_scan);
             }
             scanner_ui_dirty();
         }
@@ -3897,12 +4079,7 @@ int main(int argc, char **argv)
         if (g_freq_edit_active) {
             frequency_editor_handle(down,&r);
         } else if (g_menu_open) {
-            if (down & KEY_B) { g_menu_open = false; g_ui_dirty = true; }
-            if (down & KEY_DLEFT) { g_menu_cat = (MenuCategory)((g_menu_cat + MENU_CAT_COUNT - 1) % MENU_CAT_COUNT); g_menu_item = 0; }
-            if (down & KEY_DRIGHT){ g_menu_cat = (MenuCategory)((g_menu_cat + 1) % MENU_CAT_COUNT); g_menu_item = 0; }
-            if (down & KEY_DUP) { if (g_menu_item > 0) g_menu_item--; }
-            if (down & KEY_DDOWN) { int n=menu_item_count(g_menu_cat); if (g_menu_item < n-1) g_menu_item++; }
-            if (down & KEY_A) menu_action(&r);
+            menu_handle_input(down,&r);
         } else {
             if (down & KEY_B) {
                 u64 toggleNow=osGetTime();
