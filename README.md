@@ -111,19 +111,13 @@ The 3DS sends the sample-rate, frequency, and tuner commands after connecting.
 
 ## Download / install
 
-A tested **v0.1.0-beta scanner-hotfix** binary is included in this repository:
+The **current source tree** includes the tested scanner-hotfix changes described in the changelog.
 
-[`release/3ds-sdr.3dsx`](release/3ds-sdr.3dsx)
+> **Binary note:** `release/3ds-sdr.3dsx` is still the earlier v0.1.0-beta prebuilt and does **not** include the latest scanner synchronization fixes yet. Build the current source until the refreshed user-compiled binary is uploaded.
 
-SHA-256:
+The scanner-hotfix source intentionally uses a conservative 250 ms NFM retune quarantine, so scanning is slower but avoids assigning delayed IQ from the previous frequency to the newly displayed memory.
 
-```text
-db3148f1166a4c0c3d9c4426096b06653eafa5fde4eea9120a0cd7640399b130
-```
-
-This build includes the post-beta NFM scanner synchronization fixes described in the changelog. The scanner intentionally uses a conservative 250 ms NFM retune quarantine, so scanning is slower but avoids assigning delayed IQ from the previous frequency to the newly displayed memory.
-
-Copy `3ds-sdr.3dsx` to your SD card, for example:
+After building, copy `3ds-sdr.3dsx` to your SD card, for example:
 
 ```text
 sdmc:/3ds/3ds-sdr/3ds-sdr.3dsx
